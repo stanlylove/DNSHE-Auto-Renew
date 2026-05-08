@@ -1,39 +1,115 @@
-// DNSHE 多账号自动续期脚本 for Loon  
+// DNSHE 多账号自动续期脚本 for Loon（修复版）  
 // 参数格式: tg_bot=<Token>;tg_chatid=<ID>;pushplus=<Token>;账户名:APIKey:APISecret;...  
-// 示例: tg_bot=123456:AAF...;tg_chatid=123456789;账户一:cfsd_xxx:yyy;账户二:cfsd_zzz:aaa  
-  
 const API_BASE = 'https://api005.dnshe.com/index.php?m=domain_hub&endpoint=subdomains';  
 const RENEW_WINDOW_DAYS = 180;  
-const REQUEST_DELAY = 1500; // 毫秒，防速率限制  
+const REQUEST_DELAY = 1800; // 1.8秒，留出余量避免 60/min 限制  
+const MAX_RETRIES = 2;  
   
-function sleep(ms) {  
-    return new Promise(resolve => setTimeout(resolve, ms));  
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }  
+  
+// 通用 HTTP 请求（支持重试）  
+async function httpRequest(method, url, headers, body = null, retries = MAX_RETRIES) {  
+    for (let i = 0; i <= retries; i++) {  
+        try {  
+            const resp = await new Promise((resolve, reject) => {  
+                const params = { url, headers, timeout: 15000 };  
+                if (body) params.body = JSON.stringify(body);  
+                $httpClient[method.toLowerCase()](params, (err, response, data) => {  
+                    if (err) reject(err);  
+                    else resolve({ status: response.status, body: JSON.parse(data) });  
+                });  
+            });  
+            return resp;  
+        } catch (e) {  
+            if (i === retries) throw e;  
+            await sleep(2000 * (i + 1)); // 递增重试延迟  
+        }  
+    }  
 }  
   
-// 封装 $httpClient 为 Promise  
-function httpRequest(method, url, headers, body = null) {  
-    return new Promise((resolve, reject) => {  
-        const params = { url, headers, timeout: 15000 };  
-        if (body) {  
-            params.body = JSON.stringify(body);  
-        }  
-        $httpClient[method.toLowerCase()](params, (err, resp, data) => {  
-            if (err) reject(`HTTP request failed: ${err}`);  
-            else {  
+// 获取单个子域名详情（用于补全 expires_at）  
+async function getSubdomainDetail(apiKey, apiSecret, subdomainId) {  
+    const url = `${API_BASE}&action=get&subdomain_id=${subdomainId}`;  
+    const { status, body } = await httpRequest('GET', url, { 'X-API-Key': apiKey, 'X-API-Secret': apiSecret });  
+    if (status !== 200 || !body.success) throw new Error(`Get detail failed: ${JSON.stringify(body)}`);  
+    return body.subdomain;  
+}  
+  
+// 分页获取全部子域名（含 expires_at 兜底）  
+async function fetchAllSubdomains(apiKey, apiSecret) {  
+    let all = [];  
+    let page = 1;  
+    const perPage = 200; // 推荐200，兼顾速度和稳定性  
+    const fields = 'id,full_domain,status,expires_at';  
+    while (true) {  
+        const url = `${API_BASE}&action=list&page=${page}&per_page=${perPage}&fields=${fields}`;  
+        const { body } = await httpRequest('GET', url, { 'X-API-Key': apiKey, 'X-API-Secret': apiSecret });  
+        if (!body.success) throw new Error(`List page ${page} error: ${JSON.stringify(body)}`);  
+        const items = body.subdomains || [];  
+        // 如果某些项没有 expires_at，尝试单个获取（仅对 active 的做，减少请求）  
+        for (let item of items) {  
+            if (!item.expires_at && item.status === 'active') {  
                 try {  
-                    resolve({ status: resp.status, body: JSON.parse(data) });  
+                    const detail = await getSubdomainDetail(apiKey, apiSecret, item.id);  
+                    item.expires_at = detail.expires_at || null;  
+                    await sleep(500); // 获取详情也小间隔  
                 } catch (e) {  
-                    reject(`Invalid JSON response: ${data}`);  
+                    // 获取失败则不续期，稍后会归为跳过  
+                    console.log(`无法补全 ${item.full_domain} 过期时间: ${e.message}`);  
                 }  
             }  
-        });  
-    });  
+        }  
+        all = all.concat(items);  
+        if (body.pagination?.has_more) { page++; await sleep(1200); }  
+        else break;  
+    }  
+    return all;  
 }  
   
-// 解析 argument 配置  
+// 续期单个域名  
+async function renewSubdomain(apiKey, apiSecret, subdomainId) {  
+    const url = `${API_BASE}&action=renew`;  
+    const { body } = await httpRequest('POST', url, {  
+        'X-API-Key': apiKey,  
+        'X-API-Secret': apiSecret,  
+        'Content-Type': 'application/json'  
+    }, { subdomain_id: subdomainId });  
+    return body; // 直接返回响应体  
+}  
+  
+// 判断续期窗口（到期前180天，包含过期30天内）  
+function isInRenewWindow(expiresStr) {  
+    if (!expiresStr) return false;  
+    const d = new Date(expiresStr.replace(' ', 'T') + '+08:00');  
+    if (isNaN(d.getTime())) return false;  
+    const diffDays = (d.getTime() - Date.now()) / 86400000;  
+    return diffDays <= RENEW_WINDOW_DAYS && diffDays >= -30;  
+}  
+  
+// 发送 Telegram  
+function sendTelegram(botToken, chatId, text) {  
+    $httpClient.post({  
+        url: `https://api.telegram.org/bot${botToken}/sendMessage`,  
+        headers: { 'Content-Type': 'application/json' },  
+        body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML' }),  
+        timeout: 10000  
+    }, () => {});  
+}  
+  
+// 发送 PushPlus  
+function sendPushPlus(token, text, title) {  
+    $httpClient.post({  
+        url: 'http://www.pushplus.plus/send',  
+        headers: { 'Content-Type': 'application/json' },  
+        body: JSON.stringify({ token, title: title || 'DNSHE Renew Report', content: text, template: 'html' }),  
+        timeout: 10000  
+    }, () => {});  
+}  
+  
+// 解析配置  
 function parseConfig(arg) {  
     const accounts = [];  
-    let tgBot = null, tgChatid = null, pushplusToken = null;  
+    let tgBot = '', tgChatid = '', pushplusToken = '';  
     if (!arg) return { accounts, tgBot, tgChatid, pushplusToken };  
     arg.split(';').map(s => s.trim()).filter(Boolean).forEach(item => {  
         if (item.includes('=')) {  
@@ -43,120 +119,91 @@ function parseConfig(arg) {
             else if (k === 'pushplus') pushplusToken = v;  
         } else if (item.includes(':')) {  
             const parts = item.split(':');  
-            if (parts.length === 3) {  
-                accounts.push({ name: parts[0].trim(), apiKey: parts[1].trim(), apiSecret: parts[2].trim() });  
-            } else if (parts.length === 2) {  
-                accounts.push({ name: `账户${accounts.length + 1}`, apiKey: parts[0].trim(), apiSecret: parts[1].trim() });  
-            }  
+            if (parts.length >= 3) accounts.push({ name: parts[0].trim(), apiKey: parts[1].trim(), apiSecret: parts[2].trim() });  
+            else if (parts.length === 2) accounts.push({ name: `账户${accounts.length+1}`, apiKey: parts[0].trim(), apiSecret: parts[1].trim() });  
         }  
     });  
     return { accounts, tgBot, tgChatid, pushplusToken };  
 }  
   
-// 分页获取全部子域名  
-async function fetchAllSubdomains(apiKey, apiSecret) {  
-    let all = [];  
-    let page = 1;  
-    const perPage = 500;  
-    const fields = 'id,full_domain,status,expires_at';  
-    while (true) {  
-        const url = `${API_BASE}&action=list&page=${page}&per_page=${perPage}&fields=${fields}`;  
-        const { status, body } = await httpRequest('GET', url, { 'X-API-Key': apiKey, 'X-API-Secret': apiSecret });  
-        if (status !== 200 || !body.success) throw new Error(`List error: ${JSON.stringify(body)}`);  
-        all = all.concat(body.subdomains || []);  
-        if (body.pagination?.has_more) { page++; await sleep(1000); }  
-        else break;  
-    }  
-    return all;  
-}  
-  
-// 续期单个域名  
-async function renewSubdomain(apiKey, apiSecret, subdomainId) {  
-    const url = `${API_BASE}&action=renew`;  
-    const headers = { 'X-API-Key': apiKey, 'X-API-Secret': apiSecret, 'Content-Type': 'application/json' };  
-    const { status, body } = await httpRequest('POST', url, headers, { subdomain_id: subdomainId });  
-    return { success: status === 200 && body.success, data: body };  
-}  
-  
-// 判断是否进入续期窗口（到期前180天，包含已过期30天内）  
-function isInRenewWindow(expiresStr) {  
-    if (!expiresStr) return false;  
-    const d = new Date(expiresStr.replace(' ', 'T') + '+08:00'); // 假设北京时间  
-    if (isNaN(d.getTime())) return false;  
-    const diffDays = (d.getTime() - Date.now()) / 86400000;  
-    return diffDays <= RENEW_WINDOW_DAYS && diffDays >= -30;  
-}  
-  
-// 发送 Telegram 通知  
-function sendTelegram(botToken, chatId, text) {  
-    $httpClient.post({  
-        url: `https://api.telegram.org/bot${botToken}/sendMessage`,  
-        headers: { 'Content-Type': 'application/json' },  
-        body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML' })  
-    }, (err) => err && $notification.post('DNSHE', 'Telegram发送失败', err));  
-}  
-  
-// 发送 PushPlus 通知  
-function sendPushPlus(token, text) {  
-    $httpClient.post({  
-        url: 'http://www.pushplus.plus/send',  
-        headers: { 'Content-Type': 'application/json' },  
-        body: JSON.stringify({ token, title: 'DNSHE Renew Report', content: text, template: 'html' })  
-    }, (err) => err && $notification.post('DNSHE', 'PushPlus发送失败', err));  
-}  
-  
-// 主流程  
+// --------- 主流程 ---------  
 async function main() {  
     const { accounts, tgBot, tgChatid, pushplusToken } = parseConfig(typeof $argument !== 'undefined' ? $argument : '');  
     if (!accounts.length) {  
-        $notification.post('DNSHE Renew', '无有效账户', '请在参数中配置账户');  
+        $notification.post('DNSHE Renew', '无有效账户', '请在脚本参数中配置账户');  
         return;  
     }  
-  
     const report = [];  
+    let totalSuccess = 0, totalSkipped = 0, totalFailed = 0;  
+  
     for (const acc of accounts) {  
         let domains;  
         try {  
             domains = await fetchAllSubdomains(acc.apiKey, acc.apiSecret);  
         } catch (e) {  
-            report.push({ account: acc.name, error: `获取域名失败: ${e}` });  
+            report.push({ account: acc.name, error: `获取域名列表失败: ${e.message || e}` });  
             continue;  
         }  
         const success = [], skipped = [], failed = [];  
         for (const d of domains) {  
-            const name = d.full_domain || 'unknown';  
-            if (d.status !== 'active') { skipped.push(`${name} (状态:${d.status})`); continue; }  
-            if (!isInRenewWindow(d.expires_at)) { skipped.push(`${name} (到期:${d.expires_at})`); continue; }  
-  
+            const name = d.full_domain || `ID:${d.id}`;  
+            if (d.status !== 'active') {  
+                skipped.push(`${name} (状态:${d.status})`);  
+                continue;  
+            }  
+            if (!isInRenewWindow(d.expires_at)) {  
+                skipped.push(`${name} (${d.expires_at ? '到期:'+d.expires_at : '无过期数据'})`);  
+                continue;  
+            }  
+            // 实际续期  
             try {  
                 const res = await renewSubdomain(acc.apiKey, acc.apiSecret, d.id);  
-                if (res.success) success.push(`${name} → ${res.data.new_expires_at || '已续期'}`);  
-                else failed.push(`${name}: ${res.data.message || JSON.stringify(res.data)}`);  
+                if (res.success) {  
+                    const newExp = res.new_expires_at || '已续期';  
+                    success.push(`${name} → ${newExp}`);  
+                } else {  
+                    failed.push(`${name}: ${res.message || JSON.stringify(res)}`);  
+                }  
             } catch (e) {  
-                failed.push(`${name}: ${e}`);  
+                failed.push(`${name}: ${e.message || e}`);  
             }  
-            await sleep(REQUEST_DELAY); // 控制请求频率  
+            await sleep(REQUEST_DELAY);  
         }  
+        totalSuccess += success.length;  
+        totalSkipped += skipped.length;  
+        totalFailed += failed.length;  
         report.push({ account: acc.name, success, skipped, failed });  
     }  
   
-    // 构造详细报告  
-    let detail = '<b>DNSHE 续期报告</b>\n\n';  
+    // 构建纯文本详细报告（通知用）  
+    let reportText = `DNSHE 续期报告\n总计 — 成功:${totalSuccess} 跳过:${totalSkipped} 失败:${totalFailed}\n\n`;  
     report.forEach(r => {  
-        detail += `<b>=== ${r.account} ===</b>\n`;  
-        if (r.error) { detail += `❌ ${r.error}\n\n`; return; }  
-        detail += `✅ 成功 ${r.success.length}:\n${r.success.map(s => '  • ' + s).join('\n')}\n`;  
-        detail += `⏭ 跳过 ${r.skipped.length}:\n${r.skipped.map(s => '  • ' + s).join('\n')}\n`;  
-        detail += `❌ 失败 ${r.failed.length}:\n${r.failed.map(s => '  • ' + s).join('\n')}\n\n`;  
+        reportText += `=== ${r.account} ===\n`;  
+        if (r.error) { reportText += `❌ ${r.error}\n\n`; return; }  
+        reportText += `✅ 成功 (${r.success.length}):\n${r.success.map(s => '  • ' + s).join('\n')}\n`;  
+        reportText += `⏭ 跳过 (${r.skipped.length}):\n${r.skipped.map(s => '  • ' + s).join('\n')}\n`;  
+        reportText += `❌ 失败 (${r.failed.length}):\n${r.failed.map(s => '  • ' + s).join('\n')}\n\n`;  
     });  
   
-    // 本地通知  
-    const summary = report.map(r => r.error ? `[${r.account}] 错误` : `[${r.account}] S:${r.success.length} K:${r.skipped.length} F:${r.failed.length}`).join('\n');  
-    $notification.post('DNSHE Renew', summary, '');  
+    // 详细本地通知（副标题显示简要统计，内容显示完整报告）  
+    $notification.post(  
+        'DNSHE Renew',  
+        `成功:${totalSuccess} 跳过:${totalSkipped} 失败:${totalFailed}`,  
+        reportText  
+    );  
   
-    // 推送至 Telegram / PushPlus  
-    if (tgBot && tgChatid) sendTelegram(tgBot, tgChatid, detail);  
-    if (pushplusToken) sendPushPlus(pushplusToken, detail.replace(/<[^>]+>/g, '')); // PushPlus 示例用纯文本  
+    // 构建 HTML 报告（用于 Telegram/PushPlus）  
+    let htmlReport = '<b>DNSHE 续期报告</b>\n\n';  
+    report.forEach(r => {  
+        htmlReport += `<b>=== ${r.account} ===</b>\n`;  
+        if (r.error) { htmlReport += `❌ ${r.error}\n\n`; return; }  
+        htmlReport += `✅ 成功 (${r.success.length}):\n${r.success.map(s => '  • ' + s).join('\n')}\n`;  
+        htmlReport += `⏭ 跳过 (${r.skipped.length}):\n${r.skipped.map(s => '  • ' + s).join('\n')}\n`;  
+        htmlReport += `❌ 失败 (${r.failed.length}):\n${r.failed.map(s => '  • ' + s).join('\n')}\n\n`;  
+    });  
+  
+    if (tgBot && tgChatid) sendTelegram(tgBot, tgChatid, htmlReport);  
+    if (pushplusToken) sendPushPlus(pushplusToken, htmlReport, 'DNSHE Renew');  
   
     $done();  
 }  
