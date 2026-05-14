@@ -1,8 +1,8 @@
 /**
  * DNSHE 免费域名批量续期 (Loon Cron)
- * 支持 BoxJs 配置优先，回退到 argument
- * BoxJs Key：DNSHE_RENEW_ACCOUNTS
- * 格式：账户一:APIKey:APISecret;账户二:APIKey:APISecret
+ * 支持 BoxJs 订阅配置 -> 自动读取 DNSHE_RENEW_ACCOUNTS
+ * 回退顺序：BoxJs -> argument
+ * 添加了 console.log 日志，可在 Loon 日志页面查看
  */
 const API_BASE = "https://api005.dnshe.com/index.php?m=domain_hub";
 const PER_PAGE = 200;
