@@ -1,6 +1,6 @@
 {
   "id": "dnshe.renew.subscription",
-  "name": "DNSHE 免费域名续期",
+  "name": "DNSHE 域名续期",
   "author": "@Stanlylove",
   "icon": "https://avatars.githubusercontent.com/stanlylove?s=120",
   "repo": "https://github.com/stanlylove/Dnshe-auto-renew",
@@ -8,7 +8,7 @@
   "apps": [
     {
       "id": "dnshe.renew.app",
-      "name": "DNSHE 续期脚本",
+      "name": "DNSHE API",
       "keys": ["DNSHE_RENEW_ACCOUNTS"],
       "settings": [
         {
