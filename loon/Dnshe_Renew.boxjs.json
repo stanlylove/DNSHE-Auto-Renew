@@ -1,0 +1,16 @@
+{
+  "id": "dnshe.renew",
+  "name": "DNSHE 免费域名续期",
+  "author": "Loon Script",
+  "repo": "",
+  "settings": [
+    {
+      "id": "DNSHE_RENEW_ACCOUNTS",
+      "name": "账户列表",
+      "type": "textarea",
+      "placeholder": "格式：账户名:APIKey:APISecret;账户名2:APIKey2:APISecret2",
+      "default": "",
+      "description": "多个账户用英文分号 ; 分隔"
+    }
+  ]
+}
