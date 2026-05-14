@@ -11,8 +11,7 @@
       "type": "textarea",
       "placeholder": "账户一:APIKey:APISecret;账户二:APIKey2:APISecret2",
       "default": "",
-      "description": "多个账户用英文分号 ; 分隔，格式：名称:Key:Secret",
-      "required": true
+      "description": "多个账户用英文分号 ; 分隔"
     }
   ]
 }
