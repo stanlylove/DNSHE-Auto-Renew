@@ -1,7 +1,8 @@
 {
   "id": "dnshe.renew.subscription",
   "name": "DNSHE 免费域名续期",
-  "author": "Loon Script",
+  "author": "@Stanlylove",
+  "icon": "https://avatars.githubusercontent.com/stanlylove?s=120",
   "repo": "https://github.com/stanlylove/loon-scripts",
   "description": "自动续期 DNSHE 免费域名，支持多账户",
   "apps": [
@@ -19,7 +20,7 @@
           "desc": "多个账户用英文分号 ; 分隔，每账户格式为 名称:Key:Secret"
         }
       ],
-      "author": "Loon Script",
+      "author": "@Stanlylove",
       "repo": "https://github.com/stanlylove/loon-scripts",
       "script": "",
       "icons": [
